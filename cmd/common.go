@@ -109,7 +109,7 @@ func initWithCommand(cmd *cobra.Command) {
 	dependencies.Machine = machine.New(machine.Args{OS: dependencies.OS})
 	stateDirectory := util.Must(prepareStateDirectory(dependencies.OS, dependencies.Machine.HomeDirectory()))
 	dependencies.CookieJar = newCookieJar(stateDirectory)
-	dependencies.Keychain = newKeychain(stateDirectory, interactive)
+	dependencies.Keychain = newCommandKeychain(cmd, stateDirectory, interactive)
 	dependencies.AppStore = appstore.NewAppStore(appstore.Args{
 		CookieJar:       dependencies.CookieJar,
 		OperatingSystem: dependencies.OS,

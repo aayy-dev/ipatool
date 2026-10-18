@@ -56,6 +56,10 @@ func loginCmd() *cobra.Command {
 				password = value
 			}
 
+			if err := prepareKeychainLogin(interactive); err != nil {
+				return err
+			}
+
 			dependencies.Logger.Log().Msg("preparing authentication; the first login may take a few minutes")
 
 			var lastErr error
@@ -114,6 +118,7 @@ func loginCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&email, "email", "e", "", "Apple ID email address or phone number (required)")
 	cmd.Flags().StringVarP(&password, "password", "p", "", "password for the Apple ID (required)")
 	cmd.Flags().StringVar(&authCode, "auth-code", "", "2FA code for the Apple ID")
+	cmd.Flags().BoolVar(&protectKeychain, "protect-keychain", false, "protect the keychain with a passphrase, asked for unless --keychain-passphrase is given (where there's no system keychain)")
 
 	return cmd
 }

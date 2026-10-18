@@ -43,7 +43,7 @@ func rootCmd() *cobra.Command {
 		}, enumflag.EnumCaseSensitive), "format", "", "sets output format for command; can be 'text', 'json'")
 	cmd.PersistentFlags().BoolVar(&verbose, "verbose", false, "enables verbose logs")
 	cmd.PersistentFlags().BoolVarP(&nonInteractive, "non-interactive", "", false, "run in non-interactive session")
-	cmd.PersistentFlags().StringVar(&keychainPassphrase, "keychain-passphrase", "", "passphrase for unlocking keychain")
+	cmd.PersistentFlags().StringVar(&keychainPassphrase, "keychain-passphrase", "", "passphrase for the keychain; with \"auth login\", protects it with this passphrase (by default it has none)")
 
 	cmd.AddCommand(authCmd())
 	cmd.AddCommand(downloadCmd())
