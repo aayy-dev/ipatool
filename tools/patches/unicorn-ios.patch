@@ -29,39 +29,249 @@
  
  #define JIT_CALLBACK_GUARD(x)                       \
  {                                                   \
+--- a/qemu/include/tcg/tcg.h
++++ b/qemu/include/tcg/tcg.h
+@@ -649,6 +649,7 @@
+     void *code_gen_prologue;
+     void *code_gen_epilogue;
+     void *code_gen_buffer;
++    intptr_t code_gen_splitwx_diff; /* iOS split W^X JIT: rx - rw (0 otherwise) */
+     void *initial_buffer;
+     size_t initial_buffer_size;
+     size_t code_gen_buffer_size;
+--- a/qemu/include/exec/exec-all.h
++++ b/qemu/include/exec/exec-all.h
+@@ -307,6 +307,7 @@
+                            size <= TARGET_PAGE_SIZE) */
+     uint16_t icount;
+     uint32_t cflags;    /* compile flags */
++    intptr_t splitwx_diff; /* iOS split W^X JIT: rx - rw of this TB's buffer */
+ #define CF_COUNT_MASK  0x00007fff
+ #define CF_LAST_IO     0x00008000 /* Last insn may be an IO access.  */
+ #define CF_NOCACHE     0x00010000 /* To be freed after execution */
 --- a/qemu/accel/tcg/translate-all.c
 +++ b/qemu/accel/tcg/translate-all.c
-@@ -1019,7 +1019,7 @@
+@@ -1010,12 +1010,22 @@
+ {
+     TCGContext *tcg_ctx = uc->tcg_ctx;
+     if (tcg_ctx->initial_buffer) {
++#if defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)
++        if (tcg_ctx->code_gen_splitwx_diff) {
++            munmap((char *)tcg_ctx->initial_buffer + tcg_ctx->code_gen_splitwx_diff,
++                   tcg_ctx->initial_buffer_size);
++        }
++#endif
+         if (munmap(tcg_ctx->initial_buffer, tcg_ctx->initial_buffer_size)) {
+             perror("fail code_gen_buffer");
+         }
+     }
+ }
+ 
++#if defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)
++#include <mach/mach.h>
++#endif
++
  static inline void *alloc_code_gen_buffer(struct uc_struct *uc)
  {
      TCGContext *tcg_ctx = uc->tcg_ctx;
--    int prot = PROT_WRITE | PROT_READ | PROT_EXEC;
-+    int prot = PROT_WRITE | PROT_READ;
-     int flags = MAP_PRIVATE | MAP_ANONYMOUS;
-     size_t size = tcg_ctx->code_gen_buffer_size;
-     void *buf;
-@@ -2172,7 +2172,20 @@
+@@ -1026,10 +1036,50 @@
+ #ifdef USE_MAP_JIT
+     flags |= MAP_JIT;
+ #endif
++#if defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)
++    /* iOS: a single mapping can never be made executable (W^X ban + AMFI
++     * max-prot strip) and MAP_JIT needs a monitor-honored entitlement we do
++     * not have. Create one RWX-capable memory object and map it twice: a
++     * writable alias for code generation and an executable alias to run it,
++     * both backed by the same pages. code_gen_splitwx_diff = rx - rw; codegen
++     * writes to rw while tc.ptr/prologue/epilogue use rx. The RX pages run
++     * because jbctl marked the process debugged (pmap wx_allowed). */
++    (void)prot;
++    (void)flags;
++    {
++        mem_entry_name_port_t ent = MACH_PORT_NULL;
++        memory_object_size_t esize = size;
++        kern_return_t kr = mach_make_memory_entry_64(mach_task_self(), &esize,
++            0, MAP_MEM_NAMED_CREATE | VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE,
++            &ent, MACH_PORT_NULL);
++        if (kr != KERN_SUCCESS) {
++            fprintf(stderr, "ipatool jit make_memory_entry kr=%d\n", kr);
++            return NULL;
++        }
++        vm_address_t rw = 0, rx = 0;
++        kr = vm_map(mach_task_self(), &rw, size, 0, VM_FLAGS_ANYWHERE, ent, 0,
++            FALSE, VM_PROT_READ | VM_PROT_WRITE,
++            VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE, VM_INHERIT_DEFAULT);
++        if (kr != KERN_SUCCESS) {
++            fprintf(stderr, "ipatool jit vm_map(rw) kr=%d\n", kr);
++            return NULL;
++        }
++        kr = vm_map(mach_task_self(), &rx, size, 0, VM_FLAGS_ANYWHERE, ent, 0,
++            FALSE, VM_PROT_READ | VM_PROT_EXECUTE,
++            VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE, VM_INHERIT_DEFAULT);
++        if (kr != KERN_SUCCESS) {
++            fprintf(stderr, "ipatool jit vm_map(rx) kr=%d\n", kr);
++            return NULL;
++        }
++        tcg_ctx->code_gen_splitwx_diff = (char *)rx - (char *)rw;
++        buf = (void *)(uintptr_t)rw;
++    }
++#else
+     buf = mmap(NULL, size, prot, flags, -1, 0);
+     if (buf == MAP_FAILED) {
+         return NULL;
+     }
++#endif
+ 
+ #ifdef __mips__
+     if (cross_256mb(buf, size)) {
+@@ -1742,7 +1792,8 @@
+     }
+ 
+     gen_code_buf = tcg_ctx->code_gen_ptr;
+-    tb->tc.ptr = gen_code_buf;
++    tb->tc.ptr = (void *)((char *)gen_code_buf + tcg_ctx->code_gen_splitwx_diff);
++    tb->splitwx_diff = tcg_ctx->code_gen_splitwx_diff;
+     tb->pc = pc;
+     tb->cs_base = cs_base;
+     tb->flags = flags;
+@@ -2172,7 +2223,14 @@
  }
  
  
 -#if defined(__APPLE__) && defined(HAVE_PTHREAD_JIT_PROTECT) && (defined(__arm__) || defined(__aarch64__))
-+/* iOS CLI processes cannot use MAP_JIT outside an app sandbox. Toggle the
-+ * translation buffer between writable and executable instead of using RWX. */
++/* With a split RW/RX translation buffer there is nothing to toggle. */
 +void ipatool_jit_write_protect(struct uc_struct *uc, int enabled)
 +{
-+    TCGContext *ctx = uc->tcg_ctx;
-+    if (ctx && ctx->initial_buffer &&
-+        mprotect(ctx->initial_buffer, ctx->initial_buffer_size,
-+                 PROT_READ | (enabled ? PROT_EXEC : PROT_WRITE)) != 0) {
-+        perror("protect Unicorn translation buffer");
-+        abort();
-+    }
++    (void)uc;
++    (void)enabled;
 +}
 +
 +#if defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)
  static bool tb_exec_is_locked(struct uc_struct *uc)
  {
      return uc->current_executable;
+--- a/qemu/accel/tcg/tcg-runtime.c
++++ b/qemu/accel/tcg/tcg-runtime.c
+@@ -155,7 +155,7 @@
+ 
+     tb = tb_lookup__cpu_state(cpu, &pc, &cs_base, &flags, curr_cflags());
+     if (tb == NULL) {
+-        return uc->tcg_ctx->code_gen_epilogue;
++        return (void *)((char *)uc->tcg_ctx->code_gen_epilogue + uc->tcg_ctx->code_gen_splitwx_diff);
+     }
+     return tb->tc.ptr;
+ }
+--- a/qemu/accel/tcg/cpu-exec.c
++++ b/qemu/accel/tcg/cpu-exec.c
+@@ -204,7 +204,7 @@
+     if (TCG_TARGET_HAS_direct_jump) {
+         uintptr_t offset = tb->jmp_target_arg[n];
+         uintptr_t tc_ptr = (uintptr_t)tb->tc.ptr;
+-        tb_target_set_jmp_target(tc_ptr, tc_ptr + offset, addr);
++        tb_target_set_jmp_target(tc_ptr, tc_ptr + offset, addr, tb->splitwx_diff);
+     } else {
+         tb->jmp_target_arg[n] = addr;
+     }
+--- a/qemu/tcg/tcg.c
++++ b/qemu/tcg/tcg.c
+@@ -834,7 +834,7 @@
+     s->code_ptr = buf0;
+     s->code_buf = buf0;
+     s->data_gen_ptr = NULL;
+-    s->code_gen_prologue = buf0;
++    s->code_gen_prologue = (void *)((char *)buf0 + s->code_gen_splitwx_diff);
+ 
+     /* Compute a high-water mark, at which we voluntarily flush the buffer
+        and start over.  The size here is arbitrary, significantly larger
+@@ -857,7 +857,8 @@
+ #endif
+ 
+     buf1 = s->code_ptr;
+-    flush_icache_range((uintptr_t)buf0, (uintptr_t)buf1);
++    flush_icache_range((uintptr_t)buf0 + s->code_gen_splitwx_diff,
++                       (uintptr_t)buf1 + s->code_gen_splitwx_diff);
+ 
+     /* Deduct the prologue from the buffer.  */
+     prologue_size = tcg_current_code_size(s);
+@@ -3750,8 +3751,8 @@
+     //tcg_dump_ops(s, false, "after opt4:");
+     tcg_reg_alloc_start(s);
+ 
+-    s->code_buf = tb->tc.ptr;
+-    s->code_ptr = tb->tc.ptr;
++    s->code_buf = (void *)((char *)tb->tc.ptr - s->code_gen_splitwx_diff);
++    s->code_ptr = s->code_buf;
+ 
+ #ifdef TCG_TARGET_NEED_LDST_LABELS
+     QSIMPLEQ_INIT(&s->ldst_labels);
+@@ -3856,8 +3857,9 @@
+         return -2;
+     }
+ 
+-    /* flush instruction cache */
+-    flush_icache_range((uintptr_t)s->code_buf, (uintptr_t)s->code_ptr);
++    /* flush instruction cache (execute alias) */
++    flush_icache_range((uintptr_t)s->code_buf + s->code_gen_splitwx_diff,
++                       (uintptr_t)s->code_ptr + s->code_gen_splitwx_diff);
+ 
+     return tcg_current_code_size(s);
+ }
+--- a/qemu/tcg/aarch64/tcg-target.h
++++ b/qemu/tcg/aarch64/tcg-target.h
+@@ -163,7 +163,7 @@
+ #endif
+ }
+ 
+-void tb_target_set_jmp_target(uintptr_t, uintptr_t, uintptr_t);
++void tb_target_set_jmp_target(uintptr_t, uintptr_t, uintptr_t, intptr_t);
+ 
+ #ifdef CONFIG_SOFTMMU
+ #define TCG_TARGET_NEED_LDST_LABELS
+--- a/qemu/tcg/aarch64/tcg-target.inc.c
++++ b/qemu/tcg/aarch64/tcg-target.inc.c
+@@ -1056,12 +1056,12 @@
+     /* Look for host pointer values within 4G of the PC.  This happens
+        often when loading pointers to QEMU's own data structures.  */
+     if (type == TCG_TYPE_I64) {
+-        tcg_target_long disp = value - (intptr_t)s->code_ptr;
++        tcg_target_long disp = value - ((intptr_t)s->code_ptr + s->code_gen_splitwx_diff);
+         if (disp == sextract64(disp, 0, 21)) {
+             tcg_out_insn(s, 3406, ADR, rd, disp);
+             return;
+         }
+-        disp = (value >> 12) - ((intptr_t)s->code_ptr >> 12);
++        disp = (value >> 12) - (((intptr_t)s->code_ptr + s->code_gen_splitwx_diff) >> 12);
+         if (disp == sextract64(disp, 0, 21)) {
+             tcg_out_insn(s, 3406, ADRP, rd, disp);
+             if (value & 0xfff) {
+@@ -1325,7 +1325,7 @@
+     if (offset == sextract64(offset, 0, 26)) {
+         tcg_out_insn(s, 3206, BL, offset);
+     } else {
+-        tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP, (intptr_t)target);
++        tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP, (intptr_t)target + s->code_gen_splitwx_diff);
+         tcg_out_insn(s, 3207, BR, TCG_REG_TMP);
+     }
+ }
+@@ -1347,7 +1347,7 @@
+ }
+ 
+ void tb_target_set_jmp_target(uintptr_t tc_ptr, uintptr_t jmp_addr,
+-                              uintptr_t addr)
++                              uintptr_t addr, intptr_t splitwx_diff)
+ {
+     tcg_insn_unit i1, i2;
+     TCGType rt = TCG_TYPE_I64;
+@@ -1368,7 +1368,7 @@
+         i2 = I3401_ADDI | rt << 31 | (addr & 0xfff) << 10 | rd << 5 | rd;
+     }
+     pair = (uint64_t)i2 << 32 | i1;
+-    atomic_set((uint64_t *)jmp_addr, pair);
++    atomic_set((uint64_t *)(jmp_addr - splitwx_diff), pair);
+     flush_icache_range(jmp_addr, jmp_addr + 8);
+ }
+ 
 --- a/uc.c
 +++ b/uc.c
 @@ -35,8 +35,7 @@
