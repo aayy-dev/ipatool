@@ -105,6 +105,14 @@ func initWithCommand(cmd *cobra.Command) {
 		dependencies.Logger = log.NewLogger(log.Args{Verbose: verbose, Writer: zerolog.SyncWriter(os.Stderr)})
 	}
 
+	// On iOS the Store emulator needs JIT memory; ask the jailbreak to allow
+	// it before any command uses the emulator. A no-op elsewhere.
+	if result, err := enableJIT(); err != nil {
+		dependencies.Logger.Verbose().Err(err).Msg("could not enable JIT for the Store emulator")
+	} else if result != "" {
+		dependencies.Logger.Verbose().Str("result", result).Msg("enabled JIT for the Store emulator")
+	}
+
 	dependencies.OS = operatingsystem.New()
 	dependencies.Machine = machine.New(machine.Args{OS: dependencies.OS})
 	stateDirectory := util.Must(prepareStateDirectory(dependencies.OS, dependencies.Machine.HomeDirectory()))
