@@ -61,7 +61,7 @@
  
      if (check_offset < uc->tcg_ctx->code_gen_buffer_size) {
          tb = tcg_tb_lookup(tcg_ctx, host_pc);
-@@ -1010,12 +1011,22 @@
+@@ -1010,26 +1011,102 @@
  {
      TCGContext *tcg_ctx = uc->tcg_ctx;
      if (tcg_ctx->initial_buffer) {
@@ -73,32 +73,54 @@
 +#endif
          if (munmap(tcg_ctx->initial_buffer, tcg_ctx->initial_buffer_size)) {
              perror("fail code_gen_buffer");
-         }
-     }
- }
- 
++        }
++    }
++}
++
 +#if defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)
 +#include <mach/mach.h>
-+#endif
++#include <sys/sysctl.h>
 +
++/* The split RW/RX mapping (and its CS_DEBUGGED requirement) is only needed on
++ * iOS 26+. Older iOS runs the mprotect toggle, so detect the OS at run time. */
++static int ipatool_jit_needs_splitwx(void)
++{
++    static int cached = -1;
++    if (cached < 0) {
++        char version[64];
++        size_t len = sizeof(version);
++        long major = 0;
++        if (sysctlbyname("kern.osproductversion", version, &len, NULL, 0) == 0) {
++            major = strtol(version, NULL, 10);
+         }
++        cached = major >= 26 ? 1 : 0;
+     }
++    return cached;
+ }
++#endif
+ 
  static inline void *alloc_code_gen_buffer(struct uc_struct *uc)
  {
      TCGContext *tcg_ctx = uc->tcg_ctx;
-@@ -1026,10 +1037,53 @@
+-    int prot = PROT_WRITE | PROT_READ | PROT_EXEC;
++    int prot = PROT_WRITE | PROT_READ;
+     int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+     size_t size = tcg_ctx->code_gen_buffer_size;
+     void *buf;
  #ifdef USE_MAP_JIT
      flags |= MAP_JIT;
  #endif
 +#if defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)
-+    /* iOS: a single mapping can never be made executable (W^X ban + AMFI
-+     * max-prot strip) and MAP_JIT needs a monitor-honored entitlement we do
-+     * not have. Create one RWX-capable memory object and map it twice: a
++    /* iOS 26 removed the mprotect(PROT_EXEC) toggle below: AMFI caps an
++     * anonymous mapping's max_protection at RW, so making it executable fails
++     * with EACCES. There, map one RWX-capable memory object twice instead: a
 +     * writable alias for code generation and an executable alias to run it,
 +     * both backed by the same pages. code_gen_splitwx_diff = rx - rw; codegen
 +     * writes to rw while tc.ptr/prologue/epilogue use rx. The RX pages run
-+     * because jbctl marked the process debugged (pmap wx_allowed). */
-+    (void)prot;
-+    (void)flags;
-+    {
++     * because jbctl marked the process debugged (pmap wx_allowed). Older iOS
++     * keeps the single mapping and the toggle, which work there and don't need
++     * CS_DEBUGGED. */
++    if (ipatool_jit_needs_splitwx()) {
 +        mem_entry_name_port_t ent = MACH_PORT_NULL;
 +        memory_object_size_t esize = size;
 +        kern_return_t kr = mach_make_memory_entry_64(mach_task_self(), &esize,
@@ -128,6 +150,11 @@
 +        }
 +        tcg_ctx->code_gen_splitwx_diff = (char *)rx - (char *)rw;
 +        buf = (void *)(uintptr_t)rw;
++    } else {
++        buf = mmap(NULL, size, prot, flags, -1, 0);
++        if (buf == MAP_FAILED) {
++            return NULL;
++        }
 +    }
 +#else
      buf = mmap(NULL, size, prot, flags, -1, 0);
@@ -138,7 +165,7 @@
  
  #ifdef __mips__
      if (cross_256mb(buf, size)) {
-@@ -1742,7 +1796,8 @@
+@@ -1742,7 +1819,8 @@
      }
  
      gen_code_buf = tcg_ctx->code_gen_ptr;
@@ -148,16 +175,28 @@
      tb->pc = pc;
      tb->cs_base = cs_base;
      tb->flags = flags;
-@@ -2172,7 +2227,14 @@
+@@ -2172,7 +2250,26 @@
  }
  
  
 -#if defined(__APPLE__) && defined(HAVE_PTHREAD_JIT_PROTECT) && (defined(__arm__) || defined(__aarch64__))
 +/* With a split RW/RX translation buffer there is nothing to toggle. */
++/* iOS < 26: toggle the single translation buffer between writable and
++ * executable, since a CLI process can't use MAP_JIT. iOS 26+ uses the split
++ * RW/RX mapping (code_gen_splitwx_diff != 0), where the RX alias is always
++ * executable and there is nothing to toggle. */
 +void ipatool_jit_write_protect(struct uc_struct *uc, int enabled)
 +{
-+    (void)uc;
-+    (void)enabled;
++    TCGContext *ctx = uc ? uc->tcg_ctx : NULL;
++    if (!ctx || ctx->code_gen_splitwx_diff) {
++        return;
++    }
++    if (ctx->initial_buffer &&
++        mprotect(ctx->initial_buffer, ctx->initial_buffer_size,
++                 PROT_READ | (enabled ? PROT_EXEC : PROT_WRITE)) != 0) {
++        perror("protect Unicorn translation buffer");
++        abort();
++    }
 +}
 +
 +#if defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__)
