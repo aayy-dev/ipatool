@@ -11,7 +11,7 @@ import (
 )
 
 // enableJIT marks this process as debugged (CS_DEBUGGED) so the SAP emulator
-// can map executable (JIT) memory.
+// can map executable (JIT) memory, and returns what the jailbreak reported.
 //
 // Modern jailbreaks (Dopamine and its forks on iOS 16+, including iOS 26)
 // gate JIT behind the kernel's CS_DEBUGGED flag — "allowed to run with
@@ -25,21 +25,19 @@ import (
 // Best effort: if jbctl isn't present (another jailbreak, or none) the
 // emulator still runs where the kernel already permits JIT, and fails with
 // its own error where it doesn't.
-func enableJIT() error {
+func enableJIT() (string, error) {
 	pid := strconv.Itoa(os.Getpid())
 
 	var lastErr error
+
 	for _, jbctl := range []string{"/var/jb/usr/bin/jbctl", "jbctl"} {
 		out, err := exec.Command(jbctl, "proc_set_debugged", pid).CombinedOutput()
 		if err == nil {
-			// Unmissable confirmation it ran, independent of the log level.
-			fmt.Fprintf(os.Stderr, "ipatool: enabled JIT via %s: %s\n", jbctl, strings.TrimSpace(string(out)))
-
-			return nil
+			return fmt.Sprintf("%s: %s", jbctl, strings.TrimSpace(string(out))), nil
 		}
 
-		lastErr = fmt.Errorf("%s: %w: %s", jbctl, err, out)
+		lastErr = fmt.Errorf("%s: %w: %s", jbctl, err, strings.TrimSpace(string(out)))
 	}
 
-	return lastErr
+	return "", lastErr
 }

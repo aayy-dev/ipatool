@@ -89,9 +89,9 @@ Porting that cleanly required:
   this kernel), and do **not** shrink `code_gen_buffer_size` (the large Store
   emulation overflows a small buffer).
 
-The `dynamic-codesigning` entitlement in `resources/ios-entitlements.plist`
-is kept as a belt-and-suspenders capability hint but is **not** load-bearing
-on this jailbreak — `CS_DEBUGGED` is what actually permits execution.
+No extra entitlement is needed: `CS_DEBUGGED` is what permits execution.
+(`dynamic-codesigning` would be ignored anyway; see above.) With `--verbose`,
+ipatool logs the jailbreak's answer as "enabled JIT for the Store emulator".
 
 ## Notes
 

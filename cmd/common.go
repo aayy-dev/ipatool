@@ -107,8 +107,10 @@ func initWithCommand(cmd *cobra.Command) {
 
 	// On iOS the Store emulator needs JIT memory; ask the jailbreak to allow
 	// it before any command uses the emulator. A no-op elsewhere.
-	if err := enableJIT(); err != nil {
+	if result, err := enableJIT(); err != nil {
 		dependencies.Logger.Verbose().Err(err).Msg("could not enable JIT for the Store emulator")
+	} else if result != "" {
+		dependencies.Logger.Verbose().Str("result", result).Msg("enabled JIT for the Store emulator")
 	}
 
 	dependencies.OS = operatingsystem.New()
