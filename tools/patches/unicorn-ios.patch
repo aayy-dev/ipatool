@@ -51,7 +51,17 @@
  #define CF_NOCACHE     0x00010000 /* To be freed after execution */
 --- a/qemu/accel/tcg/translate-all.c
 +++ b/qemu/accel/tcg/translate-all.c
-@@ -1010,12 +1010,22 @@
+@@ -338,7 +338,8 @@
+      * tcg_init_ctx.code_gen_buffer check_offset will wrap to way
+      * above the code_gen_buffer_size
+      */
+-    check_offset = host_pc - (uintptr_t) uc->tcg_ctx->code_gen_buffer;
++    check_offset = host_pc - uc->tcg_ctx->code_gen_splitwx_diff -
++                   (uintptr_t) uc->tcg_ctx->code_gen_buffer;
+ 
+     if (check_offset < uc->tcg_ctx->code_gen_buffer_size) {
+         tb = tcg_tb_lookup(tcg_ctx, host_pc);
+@@ -1010,12 +1011,22 @@
  {
      TCGContext *tcg_ctx = uc->tcg_ctx;
      if (tcg_ctx->initial_buffer) {
@@ -74,7 +84,7 @@
  static inline void *alloc_code_gen_buffer(struct uc_struct *uc)
  {
      TCGContext *tcg_ctx = uc->tcg_ctx;
-@@ -1026,10 +1036,50 @@
+@@ -1026,10 +1037,53 @@
  #ifdef USE_MAP_JIT
      flags |= MAP_JIT;
  #endif
@@ -104,13 +114,16 @@
 +            VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE, VM_INHERIT_DEFAULT);
 +        if (kr != KERN_SUCCESS) {
 +            fprintf(stderr, "ipatool jit vm_map(rw) kr=%d\n", kr);
++            mach_port_deallocate(mach_task_self(), ent);
 +            return NULL;
 +        }
 +        kr = vm_map(mach_task_self(), &rx, size, 0, VM_FLAGS_ANYWHERE, ent, 0,
 +            FALSE, VM_PROT_READ | VM_PROT_EXECUTE,
 +            VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE, VM_INHERIT_DEFAULT);
++        mach_port_deallocate(mach_task_self(), ent);
 +        if (kr != KERN_SUCCESS) {
 +            fprintf(stderr, "ipatool jit vm_map(rx) kr=%d\n", kr);
++            vm_deallocate(mach_task_self(), rw, size);
 +            return NULL;
 +        }
 +        tcg_ctx->code_gen_splitwx_diff = (char *)rx - (char *)rw;
@@ -125,7 +138,7 @@
  
  #ifdef __mips__
      if (cross_256mb(buf, size)) {
-@@ -1742,7 +1792,8 @@
+@@ -1742,7 +1796,8 @@
      }
  
      gen_code_buf = tcg_ctx->code_gen_ptr;
@@ -135,7 +148,7 @@
      tb->pc = pc;
      tb->cs_base = cs_base;
      tb->flags = flags;
-@@ -2172,7 +2223,14 @@
+@@ -2172,7 +2227,14 @@
  }
  
  
@@ -254,7 +267,18 @@
          tcg_out_insn(s, 3207, BR, TCG_REG_TMP);
      }
  }
-@@ -1347,7 +1347,7 @@
+@@ -1337,7 +1337,9 @@
+ 
+ static inline void tcg_out_call(TCGContext *s, tcg_insn_unit *target)
+ {
+-    ptrdiff_t offset = target - s->code_ptr;
++    /* target is outside the buffer: measure from the RX alias the BL runs at. */
++    ptrdiff_t offset = target -
++        (tcg_insn_unit *)((intptr_t)s->code_ptr + s->code_gen_splitwx_diff);
+     if (offset == sextract64(offset, 0, 26)) {
+         tcg_out_insn(s, 3206, BL, offset);
+     } else {
+@@ -1347,7 +1349,7 @@
  }
  
  void tb_target_set_jmp_target(uintptr_t tc_ptr, uintptr_t jmp_addr,
@@ -263,7 +287,7 @@
  {
      tcg_insn_unit i1, i2;
      TCGType rt = TCG_TYPE_I64;
-@@ -1368,7 +1368,7 @@
+@@ -1368,7 +1370,7 @@
          i2 = I3401_ADDI | rt << 31 | (addr & 0xfff) << 10 | rd << 5 | rd;
      }
      pair = (uint64_t)i2 << 32 | i1;
