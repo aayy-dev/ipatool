@@ -1,0 +1,67 @@
+name: iOS deb
+
+# Build the rootless dev.rtrdd.ipatool .deb. On a v* tag: attach it to a GitHub
+# Release and tell the APT repo to publish it. Distribution build for aayy-dev's
+# repo; the upstream PR lives on pr/ios26-jit and is unaffected.
+on:
+  push:
+    branches: [keychain-passphrase-optional]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install tools
+        run: brew install ldid dpkg cmake
+
+      - name: Version
+        id: v
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            ver="${GITHUB_REF_NAME#v}"
+          else
+            ver="0.0.0-dev+${GITHUB_SHA::7}"
+          fi
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: Build + package
+        run: |
+          VERSION='${{ steps.v.outputs.ver }}' ./tools/build-ios.sh ipatool-ios-arm64
+          ./packaging/build-deb.sh ipatool-ios-arm64 '${{ steps.v.outputs.ver }}' \
+            "dev.rtrdd.ipatool_${{ steps.v.outputs.ver }}_iphoneos-arm64.deb"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ipatool-${{ steps.v.outputs.ver }}
+          path: dev.rtrdd.ipatool_*.deb
+          if-no-files-found: error
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dev.rtrdd.ipatool_*.deb \
+            --title "$GITHUB_REF_NAME" --generate-notes \
+          || gh release upload "$GITHUB_REF_NAME" dev.rtrdd.ipatool_*.deb --clobber
+
+      - name: Publish to APT repo
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.IOS_REPO_TOKEN }}
+        run: |
+          gh api repos/aayy-dev/aayy-dev.github.io/dispatches \
+            -f event_type=publish-deb \
+            -F "client_payload[repo]=${GITHUB_REPOSITORY}" \
+            -F "client_payload[tag]=${GITHUB_REF_NAME}"

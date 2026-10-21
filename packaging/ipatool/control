@@ -1,0 +1,15 @@
+Package: dev.rtrdd.ipatool
+Name: ipatool
+Version: @VERSION@
+Architecture: iphoneos-arm64
+Priority: optional
+Section: Utilities
+Maintainer: aay <275768457+aayy-dev@users.noreply.github.com>
+Author: Majd Alfhaily
+Homepage: https://github.com/aayy-dev/ipatool
+Depends: firmware (>= 15.0)
+Description: Search for and download apps from the App Store
+ Command line tool that searches the App Store for iOS, iPadOS, tvOS,
+ watchOS, visionOS and macOS apps, and downloads their .ipa or .pkg
+ packages with your Apple ID. aay's fork of majd/ipatool, patched to run
+ the App Store signing emulator (JIT) on jailbroken iOS, including iOS 26.
